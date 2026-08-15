@@ -91,18 +91,19 @@ impl GameplayClock {
         self.0 = advance_clock(self.0, dt, audio_pos);
     }
 
-    /// Jump the clock to `t`, keeping the music sink in sync so the next
+    /// Jump the clock to `t`, keeping the music sinks in sync so the next
     /// anchoring pass doesn't see a stale position and drag the clock right
-    /// back toward it. Pass the current song's sink whenever one might be
-    /// playing (loop boundaries, future A–B looping, practice-speed
-    /// changes); `None` is correct only where no sink exists yet (or ever,
-    /// e.g. Jam Session).
-    pub fn rewind_to(&mut self, t: f64, sink: Option<&AudioSink>) {
+    /// back toward it. Pass every sink that might be playing (loop
+    /// boundaries, future A-B looping, practice-speed changes): a
+    /// MIDI-backed song plays one sink per stem, so seeking only the first
+    /// leaves the rest running ahead. An empty iterator is correct only
+    /// where no sink exists yet (or ever, e.g. Jam Session).
+    pub fn rewind_to<'a>(&mut self, t: f64, sinks: impl IntoIterator<Item = &'a AudioSink>) {
         self.0 = t;
-        if let Some(sink) = sink
-            && let Err(e) = sink.try_seek(std::time::Duration::from_secs_f64(t.max(0.0)))
-        {
-            warn!("GameplayClock::rewind_to({t}): failed to seek music sink: {e:?}");
+        for sink in sinks {
+            if let Err(e) = sink.try_seek(std::time::Duration::from_secs_f64(t.max(0.0))) {
+                warn!("GameplayClock::rewind_to({t}): failed to seek music sink: {e:?}");
+            }
         }
     }
 }
@@ -157,13 +158,19 @@ pub(crate) fn tick_clock(
 
     let full_speed = practice_speed.0 == 1.0;
     let should_play = due.is_none() && full_speed;
-    if let Ok(sink) = sinks.single() {
-        if should_play && sink.is_paused() {
-            let t = clock.get();
-            clock.rewind_to(t, Some(sink));
+    // A MIDI-backed song has one `MusicPlayer` sink per stem. They are
+    // spawned in the same frame and have to start and stop together.
+    if should_play && sinks.iter().any(AudioSink::is_paused) {
+        let t = clock.get();
+        clock.rewind_to(t, sinks.iter());
+        for sink in &sinks {
             sink.play();
-        } else if !should_play && !sink.is_paused() {
-            sink.pause();
+        }
+    } else if !should_play {
+        for sink in &sinks {
+            if !sink.is_paused() {
+                sink.pause();
+            }
         }
     }
 
@@ -177,8 +184,8 @@ pub(crate) fn tick_clock(
 
     let dt = time.delta_secs_f64();
     let audio_pos = sinks
-        .single()
-        .ok()
+        .iter()
+        .next()
         .filter(|sink| should_anchor_to_sink(clock.get(), music_started.0, &mode, sink.empty()))
         .map(|sink| sink.position().as_secs_f64());
     clock.advance(dt, audio_pos);
@@ -216,7 +223,7 @@ pub(crate) fn handle_loop_boundary(
     // `rewind_to` also seeks the sink, so `tick_clock`'s anchoring doesn't
     // see it far ahead of the just-rewound clock next frame and drag the
     // clock forward again — see the doc comment on `GameplayClock`.
-    clock.rewind_to(loop_cfg.start_time, sinks.single().ok());
+    clock.rewind_to(loop_cfg.start_time, sinks.iter());
 
     // `notes` is sorted by `time`, so the reset range is one contiguous
     // slice — binary search it instead of scanning the whole song.
@@ -303,7 +310,7 @@ mod tests {
     fn rewind_to_sets_the_clock_without_a_sink() {
         let mut clock = GameplayClock::default();
         clock.set_free(10.0);
-        clock.rewind_to(2.0, None);
+        clock.rewind_to(2.0, None::<&AudioSink>);
         assert_eq!(clock.get(), 2.0);
     }
 }

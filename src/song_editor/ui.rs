@@ -13,7 +13,7 @@ use super::mod_panel::spawn_mod_panel;
 use super::playback::{EditorAudio, EditorProgressFill, Playhead, PlayheadLine};
 use super::state::{EditorState, Mode, Scroll, TimelineTool};
 use super::{BEAT_W, HOLE_COL_W, NOTE_PAD, ROW_H, grid_height};
-use crate::audio_system::pitch_detect::PitchAlgorithm;
+use crate::audio_system::pitch_detect::{PitchAlgorithm, PitchRange};
 use crate::settings::{ActionButtonStyle, AudioSettings};
 use crate::theme::{LoadedTheme, SongEditorColors};
 use bevy_fluent::prelude::Localization;
@@ -253,15 +253,35 @@ pub(super) fn rebuild_grid_on_resize(
     }
 }
 
+/// Tears the editor down on the way out. A running take or practice run has
+/// to be stopped here rather than only on the Stop/Finish buttons:
+/// `EditorState` and `RecordState` outlive the screen, so a take left open
+/// when the player hits Back stays `active` and records again the moment
+/// the editor is re-entered, with nobody having pressed Play.
+/// `stop_practice`/`stop_record` despawn the `EditorAudio` sinks
+/// themselves, so this only despawns the UI root.
 pub(super) fn cleanup(
     mut commands: Commands,
     roots: Query<Entity, With<EditorRoot>>,
     audio: Query<Entity, With<EditorAudio>>,
+    mut state: ResMut<EditorState>,
+    mut practice: ResMut<super::practice::PracticeState>,
+    mut record: ResMut<super::record::RecordState>,
+    mut playhead: ResMut<Playhead>,
+    mut pitch_range: ResMut<PitchRange>,
+    mut count_in: ResMut<super::metronome::CountIn>,
 ) {
+    super::practice::stop_practice(&audio, &mut practice, &mut playhead, &mut commands);
+    super::record::stop_record(
+        &mut state,
+        &audio,
+        &mut record,
+        &mut playhead,
+        &mut pitch_range,
+        &mut count_in,
+        &mut commands,
+    );
     for e in &roots {
-        commands.entity(e).despawn();
-    }
-    for e in &audio {
         commands.entity(e).despawn();
     }
 }
